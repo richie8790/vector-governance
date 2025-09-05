@@ -1,220 +1,383 @@
-;; VectorGovernance - Multi-Dimensional Reputation-Based Decision Platform
+;; VectorGovernance - Enhanced Multi-Dimensional Reputation-Based Decision Platform
+;; A decentralized governance system with reputation-weighted voting and STX-backed proposals
 
-;; Error Constants
-(define-constant ERR-NOT-AUTHORIZED (err u100))
-(define-constant ERR-INVALID-AMOUNT (err u101))
-(define-constant ERR-PROPOSAL-NOT-FOUND (err u102))
-(define-constant ERR-ALREADY-EXECUTED (err u103))
-(define-constant ERR-INSUFFICIENT-VOTING-POWER (err u104))
-(define-constant ERR-ORGANIZATION-NOT-FOUND (err u105))
-(define-constant ERR-NOT-MEMBER (err u106))
-(define-constant ERR-INVALID-INPUT (err u107))
-(define-constant ERR-ALREADY-CLAIMED (err u108))
-(define-constant ERR-CANNOT-VOTE-ON-OWN-PROPOSAL (err u109))
-(define-constant ERR-ALREADY-MEMBER (err u110))
+;; =============================================================================
+;; ERROR CONSTANTS
+;; =============================================================================
+(define-constant ERR-NOT-AUTHORIZED (err u1000))
+(define-constant ERR-INVALID-AMOUNT (err u1001))
+(define-constant ERR-PROPOSAL-NOT-FOUND (err u1002))
+(define-constant ERR-ALREADY-EXECUTED (err u1003))
+(define-constant ERR-INSUFFICIENT-REPUTATION (err u1004))
+(define-constant ERR-ORGANIZATION-NOT-FOUND (err u1005))
+(define-constant ERR-NOT-MEMBER (err u1006))
+(define-constant ERR-INVALID-INPUT (err u1007))
+(define-constant ERR-ALREADY-CLAIMED (err u1008))
+(define-constant ERR-SELF-VOTE-PROHIBITED (err u1009))
+(define-constant ERR-ALREADY-MEMBER (err u1010))
+(define-constant ERR-PROPOSAL-EXPIRED (err u1011))
+(define-constant ERR-INSUFFICIENT-QUORUM (err u1012))
+(define-constant ERR-ORGANIZATION-INACTIVE (err u1013))
+(define-constant ERR-VOTING-PERIOD_ENDED (err u1014))
 
-;; Constants
+;; =============================================================================
+;; SYSTEM CONSTANTS
+;; =============================================================================
 (define-constant CONTRACT-OWNER tx-sender)
-(define-constant MAX-PROPOSAL-WEIGHT u100000000) ;; 100 STX (in micro-STX)
-(define-constant MIN-VECTOR-SCORE u10)
-(define-constant INITIAL-VECTOR-SCORE u100)
-(define-constant NEW-MEMBER-VECTOR-SCORE u50)
-(define-constant VECTOR-POINTS-PER-MICROSTX u100) ;; 1 vector point per 100 micro-STX
+(define-constant MAX-PROPOSAL-AMOUNT u1000000000) ;; 1,000 STX (in micro-STX)
+(define-constant MIN-PROPOSAL-AMOUNT u1000000) ;; 1 STX minimum
+(define-constant MIN-REPUTATION-TO-PROPOSE u50)
+(define-constant MIN-REPUTATION-TO_VOTE u10)
 
-;; Data Variables
+;; Reputation system constants
+(define-constant FOUNDER-INITIAL-REPUTATION u1000)
+(define-constant MEMBER-INITIAL-REPUTATION u100)
+(define-constant REPUTATION-PER-MICROSTX u10) ;; Reputation gained per micro-STX voted
+(define-constant PROPOSAL-CREATION-REPUTATION u25)
+(define-constant SUCCESSFUL-PROPOSAL-BONUS u100)
+
+;; Governance parameters
+(define-constant VOTING-PERIOD-BLOCKS u1440) ;; ~10 days at 10 min/block
+(define-constant QUORUM-PERCENTAGE u25) ;; 25% of members must participate
+(define-constant EXECUTION-THRESHOLD-PERCENTAGE u60) ;; 60% approval needed
+
+;; =============================================================================
+;; DATA VARIABLES
+;; =============================================================================
 (define-data-var next-proposal-id uint u1)
 (define-data-var next-organization-id uint u1)
+(define-data-var platform-fee-rate uint u250) ;; 2.5% fee (250 basis points)
+(define-data-var total-platform-fees uint u0)
 
-;; Data Maps
-(define-map Organizations
-    { organization-id: uint }
+;; =============================================================================
+;; DATA MAPS
+;; =============================================================================
+
+;; Organization registry
+(define-map organizations
+    { org-id: uint }
     {
-        name: (string-ascii 50),
+        name: (string-ascii 64),
+        description: (string-ascii 256),
         founder: principal,
         member-count: uint,
-        total-decisions: uint,
+        total-proposals: uint,
+        successful-proposals: uint,
+        total-volume: uint,
         is-active: bool,
-        created-at: uint
+        created-at: uint,
+        min-reputation-to-propose: uint,
+        quorum-threshold: uint
     }
 )
 
-(define-map VectorMembers
-    { organization-id: uint, member: principal }
+;; Member profiles with enhanced tracking
+(define-map members
+    { org-id: uint, member: principal }
     {
         reputation: uint,
         votes-cast: uint,
-        proposals-made: uint,
-        joined-at: uint
+        stx-voted: uint,
+        proposals-created: uint,
+        successful-proposals: uint,
+        joined-at: uint,
+        last-active: uint,
+        is-active: bool
     }
 )
 
-(define-map GovernanceProposals
+;; Proposal registry with enhanced metadata
+(define-map proposals
     { proposal-id: uint }
     {
-        organization-id: uint,
+        org-id: uint,
         proposer: principal,
-        title: (string-ascii 100),
-        amount: uint,
+        title: (string-ascii 128),
+        description: (string-ascii 512),
+        funding-amount: uint,
+        votes-for: uint,
+        votes-against: uint,
+        total-stx-voted: uint,
+        unique-voters: uint,
+        created-at: uint,
+        voting-ends-at: uint,
         executed: bool,
         claimed: bool,
-        created-at: uint,
-        total-voting-weight: uint
+        execution-threshold: uint,
+        category: (string-ascii 32)
     }
 )
 
-(define-map VotingActions
+;; Vote tracking with support/opposition
+(define-map votes
     { proposal-id: uint, voter: principal }
     {
-        amount: uint,
-        voted-at: uint
+        stx-amount: uint,
+        support: bool, ;; true = for, false = against
+        voted-at: uint,
+        reputation-at-vote: uint
     }
 )
 
-(define-map VoterTotals
+;; Member vote totals per proposal (for quorum calculation)
+(define-map vote-totals
     { proposal-id: uint, voter: principal }
-    { total-amount: uint }
+    { total-stx: uint }
 )
 
-;; Read-only Functions
-(define-read-only (get-organization (organization-id uint))
-    (map-get? Organizations { organization-id: organization-id })
+;; Organization member list for efficient querying
+(define-map org-members
+    { org-id: uint, member-index: uint }
+    { member: principal }
 )
 
-(define-read-only (get-vector-member (organization-id uint) (member principal))
-    (map-get? VectorMembers { organization-id: organization-id, member: member })
+;; =============================================================================
+;; READ-ONLY FUNCTIONS
+;; =============================================================================
+
+(define-read-only (get-organization (org-id uint))
+    (map-get? organizations { org-id: org-id })
 )
 
-(define-read-only (get-governance-proposal (proposal-id uint))
-    (map-get? GovernanceProposals { proposal-id: proposal-id })
+(define-read-only (get-member (org-id uint) (member principal))
+    (map-get? members { org-id: org-id, member: member })
 )
 
-(define-read-only (get-voting-action (proposal-id uint) (voter principal))
-    (map-get? VotingActions { proposal-id: proposal-id, voter: voter })
+(define-read-only (get-proposal (proposal-id uint))
+    (map-get? proposals { proposal-id: proposal-id })
 )
 
-(define-read-only (get-voter-total (proposal-id uint) (voter principal))
+(define-read-only (get-vote (proposal-id uint) (voter principal))
+    (map-get? votes { proposal-id: proposal-id, voter: voter })
+)
+
+(define-read-only (get-vote-total (proposal-id uint) (voter principal))
     (default-to 
-        { total-amount: u0 }
-        (map-get? VoterTotals { proposal-id: proposal-id, voter: voter })
+        { total-stx: u0 }
+        (map-get? vote-totals { proposal-id: proposal-id, voter: voter })
     )
 )
 
-(define-read-only (is-vector-member (organization-id uint) (member principal))
-    (is-some (map-get? VectorMembers { organization-id: organization-id, member: member }))
+(define-read-only (is-member (org-id uint) (member principal))
+    (match (get-member org-id member)
+        member-data (get is-active member-data)
+        false
+    )
 )
 
-(define-read-only (get-next-proposal-id)
-    (var-get next-proposal-id)
+(define-read-only (get-member-reputation (org-id uint) (member principal))
+    (match (get-member org-id member)
+        member-data (some (get reputation member-data))
+        none
+    )
 )
 
-(define-read-only (get-next-organization-id)
-    (var-get next-organization-id)
+(define-read-only (can-propose (org-id uint) (member principal))
+    (match (get-organization org-id)
+        org-data
+        (match (get-member org-id member)
+            member-data
+            (and 
+                (get is-active org-data)
+                (get is-active member-data)
+                (>= (get reputation member-data) (get min-reputation-to-propose org-data))
+            )
+            false
+        )
+        false
+    )
 )
 
-;; Private Functions
-(define-private (validate-vector-member (organization-id uint) (member principal))
-    (if (is-vector-member organization-id member)
+(define-read-only (can-vote (org-id uint) (member principal))
+    (match (get-member org-id member)
+        member-data
+        (and 
+            (get is-active member-data)
+            (>= (get reputation member-data) MIN-REPUTATION-TO_VOTE)
+        )
+        false
+    )
+)
+
+(define-read-only (get-proposal-status (proposal-id uint))
+    (match (get-proposal proposal-id)
+        proposal-data
+        (let (
+            (current-block block-height)
+            (voting-ended (> current-block (get voting-ends-at proposal-data)))
+            (execution-met (>= (get votes-for proposal-data) (get execution-threshold proposal-data)))
+            (quorum-met (>= (get unique-voters proposal-data) 
+                           (get quorum-threshold 
+                                (unwrap-panic (get-organization (get org-id proposal-data))))))
+        )
+        (some {
+            proposal-id: proposal-id,
+            voting-active: (not voting-ended),
+            quorum-met: quorum-met,
+            execution-threshold-met: execution-met,
+            can-execute: (and voting-ended quorum-met execution-met),
+            executed: (get executed proposal-data),
+            claimed: (get claimed proposal-data)
+        }))
+        none
+    )
+)
+
+(define-read-only (get-platform-stats)
+    {
+        total-organizations: (- (var-get next-organization-id) u1),
+        total-proposals: (- (var-get next-proposal-id) u1),
+        platform-fee-rate: (var-get platform-fee-rate),
+        total-fees-collected: (var-get total-platform-fees)
+    }
+)
+
+;; =============================================================================
+;; PRIVATE FUNCTIONS
+;; =============================================================================
+
+(define-private (validate-member (org-id uint) (member principal))
+    (if (is-member org-id member)
         (ok true)
         ERR-NOT-MEMBER
     )
 )
 
-(define-private (validate-organization-exists (organization-id uint))
-    (let (
-        (organization-opt (get-organization organization-id))
-    )
-        (if (is-some organization-opt)
-            (let (
-                (organization-data (unwrap-panic organization-opt))
-            )
-                (if (get is-active organization-data)
-                    (ok organization-data)
-                    ERR-ORGANIZATION-NOT-FOUND)
-            )
-            ERR-ORGANIZATION-NOT-FOUND
+(define-private (validate-organization (org-id uint))
+    (match (get-organization org-id)
+        org-data
+        (if (get is-active org-data)
+            (ok org-data)
+            ERR-ORGANIZATION-INACTIVE
         )
+        ERR-ORGANIZATION-NOT-FOUND
     )
 )
 
-(define-private (update-member-vector-score (organization-id uint) (member principal) (points uint))
-    (let (
-        (member-opt (get-vector-member organization-id member))
-    )
-        (if (is-some member-opt)
-            (let (
-                (member-data (unwrap-panic member-opt))
+(define-private (calculate-platform-fee (amount uint))
+    (/ (* amount (var-get platform-fee-rate)) u10000)
+)
+
+(define-private (update-member-reputation (org-id uint) (member principal) (points uint))
+    (match (get-member org-id member)
+        member-data
+        (begin
+            (map-set members
+                { org-id: org-id, member: member }
+                (merge member-data { 
+                    reputation: (+ (get reputation member-data) points),
+                    last-active: block-height
+                })
             )
-                (map-set VectorMembers
-                    { organization-id: organization-id, member: member }
-                    (merge member-data { 
-                        reputation: (+ (get reputation member-data) points)
-                    })
-                )
-                (ok true)
-            )
-            ERR-NOT-MEMBER
+            (ok true)
         )
+        ERR-NOT-MEMBER
     )
 )
 
-;; Public Functions
-
-;; Create a new organization
-(define-public (create-organization (name (string-ascii 50)))
-    (let (
-        (organization-id (var-get next-organization-id))
+(define-private (is-voting-period-active (proposal-id uint))
+    (match (get-proposal proposal-id)
+        proposal-data
+        (<= block-height (get voting-ends-at proposal-data))
+        false
     )
+)
+
+;; =============================================================================
+;; PUBLIC FUNCTIONS - ORGANIZATION MANAGEMENT
+;; =============================================================================
+
+(define-public (create-organization 
+    (name (string-ascii 64))
+    (description (string-ascii 256))
+    (min-reputation-to-propose uint)
+    (quorum-threshold uint))
+    (let (
+        (org-id (var-get next-organization-id))
+    )
+        ;; Validation
         (asserts! (> (len name) u0) ERR-INVALID-INPUT)
-        (asserts! (<= (len name) u50) ERR-INVALID-INPUT)
+        (asserts! (> (len description) u0) ERR-INVALID-INPUT)
+        (asserts! (>= min-reputation-to-propose MIN-REPUTATION-TO-PROPOSE) ERR-INVALID-INPUT)
+        (asserts! (and (>= quorum-threshold u1) (<= quorum-threshold u100)) ERR-INVALID-INPUT)
         
-        (map-set Organizations
-            { organization-id: organization-id }
+        ;; Create organization
+        (map-set organizations
+            { org-id: org-id }
             {
                 name: name,
+                description: description,
                 founder: tx-sender,
                 member-count: u1,
-                total-decisions: u0,
+                total-proposals: u0,
+                successful-proposals: u0,
+                total-volume: u0,
                 is-active: true,
-                created-at: block-height
+                created-at: block-height,
+                min-reputation-to-propose: min-reputation-to-propose,
+                quorum-threshold: quorum-threshold
             }
         )
         
-        (map-set VectorMembers
-            { organization-id: organization-id, member: tx-sender }
+        ;; Add founder as first member with high reputation
+        (map-set members
+            { org-id: org-id, member: tx-sender }
             {
-                reputation: INITIAL-VECTOR-SCORE,
+                reputation: FOUNDER-INITIAL-REPUTATION,
                 votes-cast: u0,
-                proposals-made: u0,
-                joined-at: block-height
+                stx-voted: u0,
+                proposals-created: u0,
+                successful-proposals: u0,
+                joined-at: block-height,
+                last-active: block-height,
+                is-active: true
             }
         )
         
-        (var-set next-organization-id (+ organization-id u1))
-        (ok organization-id)
+        ;; Add to member list
+        (map-set org-members
+            { org-id: org-id, member-index: u0 }
+            { member: tx-sender }
+        )
+        
+        (var-set next-organization-id (+ org-id u1))
+        (ok org-id)
     )
 )
 
-;; Join an existing organization
-(define-public (join-organization (organization-id uint))
+(define-public (join-organization (org-id uint))
     (let (
-        (organization-data (try! (validate-organization-exists organization-id)))
+        (org-data (try! (validate-organization org-id)))
+        (current-member-count (get member-count org-data))
     )
-        (asserts! (not (is-vector-member organization-id tx-sender)) ERR-ALREADY-MEMBER)
+        (asserts! (not (is-member org-id tx-sender)) ERR-ALREADY-MEMBER)
         
-        (map-set VectorMembers
-            { organization-id: organization-id, member: tx-sender }
+        ;; Add new member
+        (map-set members
+            { org-id: org-id, member: tx-sender }
             {
-                reputation: NEW-MEMBER-VECTOR-SCORE,
+                reputation: MEMBER-INITIAL-REPUTATION,
                 votes-cast: u0,
-                proposals-made: u0,
-                joined-at: block-height
+                stx-voted: u0,
+                proposals-created: u0,
+                successful-proposals: u0,
+                joined-at: block-height,
+                last-active: block-height,
+                is-active: true
             }
         )
         
-        (map-set Organizations
-            { organization-id: organization-id }
-            (merge organization-data { 
-                member-count: (+ (get member-count organization-data) u1)
+        ;; Add to member list
+        (map-set org-members
+            { org-id: org-id, member-index: current-member-count }
+            { member: tx-sender }
+        )
+        
+        ;; Update organization member count
+        (map-set organizations
+            { org-id: org-id }
+            (merge org-data { 
+                member-count: (+ current-member-count u1)
             })
         )
         
@@ -222,107 +385,154 @@
     )
 )
 
-;; Submit a governance proposal
-(define-public (submit-proposal 
-    (organization-id uint) 
-    (title (string-ascii 100)) 
-    (amount uint))
+;; =============================================================================
+;; PUBLIC FUNCTIONS - PROPOSAL MANAGEMENT
+;; =============================================================================
+
+(define-public (create-proposal 
+    (org-id uint) 
+    (title (string-ascii 128)) 
+    (description (string-ascii 512))
+    (funding-amount uint)
+    (category (string-ascii 32)))
     (let (
         (proposal-id (var-get next-proposal-id))
-        (member-data (unwrap! (get-vector-member organization-id tx-sender) ERR-NOT-MEMBER))
+        (org-data (try! (validate-organization org-id)))
+        (member-data (unwrap! (get-member org-id tx-sender) ERR-NOT-MEMBER))
+        (execution-threshold (/ (* funding-amount EXECUTION-THRESHOLD-PERCENTAGE) u100))
     )
+        ;; Validation
         (asserts! (> (len title) u0) ERR-INVALID-INPUT)
-        (asserts! (<= (len title) u100) ERR-INVALID-INPUT)
-        (asserts! (and (> amount u0) (<= amount MAX-PROPOSAL-WEIGHT)) ERR-INVALID-AMOUNT)
-        (try! (validate-organization-exists organization-id))
-        (try! (validate-vector-member organization-id tx-sender))
-        (asserts! (>= (get reputation member-data) MIN-VECTOR-SCORE) ERR-NOT-AUTHORIZED)
+        (asserts! (> (len description) u0) ERR-INVALID-INPUT)
+        (asserts! (> (len category) u0) ERR-INVALID-INPUT)
+        (asserts! (and (>= funding-amount MIN-PROPOSAL-AMOUNT) 
+                      (<= funding-amount MAX-PROPOSAL-AMOUNT)) ERR-INVALID-AMOUNT)
+        (asserts! (can-propose org-id tx-sender) ERR-INSUFFICIENT-REPUTATION)
         
-        (map-set GovernanceProposals
+        ;; Create proposal
+        (map-set proposals
             { proposal-id: proposal-id }
             {
-                organization-id: organization-id,
+                org-id: org-id,
                 proposer: tx-sender,
                 title: title,
-                amount: amount,
+                description: description,
+                funding-amount: funding-amount,
+                votes-for: u0,
+                votes-against: u0,
+                total-stx-voted: u0,
+                unique-voters: u0,
+                created-at: block-height,
+                voting-ends-at: (+ block-height VOTING-PERIOD-BLOCKS),
                 executed: false,
                 claimed: false,
-                created-at: block-height,
-                total-voting-weight: u0
+                execution-threshold: execution-threshold,
+                category: category
             }
         )
         
-        (map-set VectorMembers
-            { organization-id: organization-id, member: tx-sender }
+        ;; Update member stats
+        (map-set members
+            { org-id: org-id, member: tx-sender }
             (merge member-data { 
-                proposals-made: (+ (get proposals-made member-data) u1)
+                proposals-created: (+ (get proposals-created member-data) u1)
             })
         )
+        
+        ;; Update organization stats
+        (map-set organizations
+            { org-id: org-id }
+            (merge org-data { 
+                total-proposals: (+ (get total-proposals org-data) u1)
+            })
+        )
+        
+        ;; Award reputation for creating proposal
+        (try! (update-member-reputation org-id tx-sender PROPOSAL-CREATION-REPUTATION))
         
         (var-set next-proposal-id (+ proposal-id u1))
         (ok proposal-id)
     )
 )
 
-;; Cast vote on a proposal
-(define-public (cast-vote (proposal-id uint) (amount uint))
+(define-public (vote-on-proposal (proposal-id uint) (stx-amount uint) (support bool))
     (let (
-        (proposal-data (unwrap! (get-governance-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
-        (current-total (get total-voting-weight proposal-data))
-        (voter-current (get total-amount (get-voter-total proposal-id tx-sender)))
-        (organization-id (get organization-id proposal-data))
+        (proposal-data (unwrap! (get-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
+        (org-id (get org-id proposal-data))
+        (member-data (unwrap! (get-member org-id tx-sender) ERR-NOT-MEMBER))
+        (existing-vote (get-vote proposal-id tx-sender))
+        (platform-fee (calculate-platform-fee stx-amount))
+        (vote-amount (- stx-amount platform-fee))
+        (is-new-voter (is-none existing-vote))
     )
+        ;; Validation
+        (asserts! (> stx-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (not (is-eq tx-sender (get proposer proposal-data))) ERR-SELF-VOTE-PROHIBITED)
+        (asserts! (can-vote org-id tx-sender) ERR-INSUFFICIENT-REPUTATION)
+        (asserts! (is-voting-period-active proposal-id) ERR-VOTING-PERIOD_ENDED)
         (asserts! (not (get executed proposal-data)) ERR-ALREADY-EXECUTED)
-        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
-        (asserts! (not (is-eq tx-sender (get proposer proposal-data))) ERR-CANNOT-VOTE-ON-OWN-PROPOSAL)
-        (try! (validate-vector-member organization-id tx-sender))
         
-        ;; Transfer STX to contract
-        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        ;; Transfer STX (including platform fee)
+        (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
         
-        ;; Update voting action record
-        (map-set VotingActions
+        ;; Update platform fees
+        (var-set total-platform-fees (+ (var-get total-platform-fees) platform-fee))
+        
+        ;; Record vote
+        (map-set votes
             { proposal-id: proposal-id, voter: tx-sender }
             {
-                amount: amount,
-                voted-at: block-height
+                stx-amount: vote-amount,
+                support: support,
+                voted-at: block-height,
+                reputation-at-vote: (get reputation member-data)
             }
         )
         
-        ;; Update voter's total votes for this proposal
-        (map-set VoterTotals
-            { proposal-id: proposal-id, voter: tx-sender }
-            { total-amount: (+ voter-current amount) }
+        ;; Update vote totals
+        (let (
+            (current-total (get total-stx (get-vote-total proposal-id tx-sender)))
+        )
+            (map-set vote-totals
+                { proposal-id: proposal-id, voter: tx-sender }
+                { total-stx: (+ current-total vote-amount) }
+            )
         )
         
-        ;; Update proposal total
+        ;; Update proposal vote counts
         (let (
-            (new-total (+ current-total amount))
-            (is-now-executed (>= new-total (get amount proposal-data)))
+            (new-votes-for (if support 
+                              (+ (get votes-for proposal-data) vote-amount)
+                              (get votes-for proposal-data)))
+            (new-votes-against (if support 
+                                  (get votes-against proposal-data)
+                                  (+ (get votes-against proposal-data) vote-amount)))
+            (new-unique-voters (if is-new-voter
+                                  (+ (get unique-voters proposal-data) u1)
+                                  (get unique-voters proposal-data)))
         )
-            (map-set GovernanceProposals
+            (map-set proposals
                 { proposal-id: proposal-id }
                 (merge proposal-data { 
-                    total-voting-weight: new-total,
-                    executed: is-now-executed
+                    votes-for: new-votes-for,
+                    votes-against: new-votes-against,
+                    total-stx-voted: (+ (get total-stx-voted proposal-data) vote-amount),
+                    unique-voters: new-unique-voters
                 })
             )
         )
         
-        ;; Update voter vector score
-        (try! (update-member-vector-score 
-            organization-id 
-            tx-sender 
-            (/ amount VECTOR-POINTS-PER-MICROSTX)))
-        
-        ;; Update voter's vote count
+        ;; Update member stats and reputation
         (let (
-            (member-data (unwrap! (get-vector-member organization-id tx-sender) ERR-NOT-MEMBER))
+            (reputation-gain (/ vote-amount REPUTATION-PER-MICROSTX))
         )
-            (map-set VectorMembers
-                { organization-id: organization-id, member: tx-sender }
+            (map-set members
+                { org-id: org-id, member: tx-sender }
                 (merge member-data { 
-                    votes-cast: (+ (get votes-cast member-data) u1)
+                    votes-cast: (+ (get votes-cast member-data) u1),
+                    stx-voted: (+ (get stx-voted member-data) vote-amount),
+                    reputation: (+ (get reputation member-data) reputation-gain),
+                    last-active: block-height
                 })
             )
         )
@@ -331,33 +541,53 @@
     )
 )
 
-;; Claim executed proposal funds (only proposer can call)
-(define-public (claim-proposal (proposal-id uint))
+(define-public (execute-proposal (proposal-id uint))
     (let (
-        (proposal-data (unwrap! (get-governance-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
-        (organization-id (get organization-id proposal-data))
+        (proposal-data (unwrap! (get-proposal proposal-id) ERR-PROPOSAL-NOT-FOUND))
+        (org-id (get org-id proposal-data))
+        (org-data (unwrap! (get-organization org-id) ERR-ORGANIZATION-NOT-FOUND))
+        (proposer (get proposer proposal-data))
+        (funding-amount (get funding-amount proposal-data))
+        (total-voted (get total-stx-voted proposal-data))
     )
-        (asserts! (is-eq tx-sender (get proposer proposal-data)) ERR-NOT-AUTHORIZED)
-        (asserts! (get executed proposal-data) ERR-INSUFFICIENT-VOTING-POWER)
-        (asserts! (not (get claimed proposal-data)) ERR-ALREADY-CLAIMED)
+        ;; Validation
+        (asserts! (not (is-voting-period-active proposal-id)) ERR-VOTING-PERIOD_ENDED)
+        (asserts! (not (get executed proposal-data)) ERR-ALREADY-EXECUTED)
+        (asserts! (>= (get unique-voters proposal-data) (get quorum-threshold org-data)) ERR-INSUFFICIENT-QUORUM)
+        (asserts! (>= (get votes-for proposal-data) (get execution-threshold proposal-data)) ERR-INSUFFICIENT-REPUTATION)
         
-        ;; Mark as claimed first to prevent re-entrancy
-        (map-set GovernanceProposals
+        ;; Mark as executed
+        (map-set proposals
             { proposal-id: proposal-id }
-            (merge proposal-data { claimed: true })
+            (merge proposal-data { 
+                executed: true,
+                claimed: true ;; Auto-claim on execution
+            })
         )
         
         ;; Transfer funds to proposer
-        (try! (as-contract (stx-transfer? (get total-voting-weight proposal-data) tx-sender (get proposer proposal-data))))
+        (try! (as-contract (stx-transfer? total-voted tx-sender proposer)))
         
-        ;; Update organization total decisions
-        (let (
-            (organization-data (unwrap! (get-organization organization-id) ERR-ORGANIZATION-NOT-FOUND))
+        ;; Update organization stats
+        (map-set organizations
+            { org-id: org-id }
+            (merge org-data { 
+                successful-proposals: (+ (get successful-proposals org-data) u1),
+                total-volume: (+ (get total-volume org-data) total-voted)
+            })
         )
-            (map-set Organizations
-                { organization-id: organization-id }
-                (merge organization-data { 
-                    total-decisions: (+ (get total-decisions organization-data) u1)
+        
+        ;; Award bonus reputation to successful proposer
+        (try! (update-member-reputation org-id proposer SUCCESSFUL-PROPOSAL-BONUS))
+        
+        ;; Update proposer's successful proposal count
+        (let (
+            (proposer-data (unwrap! (get-member org-id proposer) ERR-NOT-MEMBER))
+        )
+            (map-set members
+                { org-id: org-id, member: proposer }
+                (merge proposer-data { 
+                    successful-proposals: (+ (get successful-proposals proposer-data) u1)
                 })
             )
         )
@@ -366,18 +596,67 @@
     )
 )
 
-;; Emergency function to deactivate organization (only founder can call)
-(define-public (deactivate-organization (organization-id uint))
+;; =============================================================================
+;; PUBLIC FUNCTIONS - ADMINISTRATION
+;; =============================================================================
+
+(define-public (update-organization-settings 
+    (org-id uint)
+    (min-reputation-to-propose uint)
+    (quorum-threshold uint))
     (let (
-        (organization-data (unwrap! (get-organization organization-id) ERR-ORGANIZATION-NOT-FOUND))
+        (org-data (unwrap! (get-organization org-id) ERR-ORGANIZATION-NOT-FOUND))
     )
-        (asserts! (is-eq tx-sender (get founder organization-data)) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq tx-sender (get founder org-data)) ERR-NOT-AUTHORIZED)
+        (asserts! (>= min-reputation-to-propose MIN-REPUTATION-TO-PROPOSE) ERR-INVALID-INPUT)
+        (asserts! (and (>= quorum-threshold u1) (<= quorum-threshold u100)) ERR-INVALID-INPUT)
         
-        (map-set Organizations
-            { organization-id: organization-id }
-            (merge organization-data { is-active: false })
+        (map-set organizations
+            { org-id: org-id }
+            (merge org-data { 
+                min-reputation-to-propose: min-reputation-to-propose,
+                quorum-threshold: quorum-threshold
+            })
         )
         
+        (ok true)
+    )
+)
+
+(define-public (toggle-organization-status (org-id uint))
+    (let (
+        (org-data (unwrap! (get-organization org-id) ERR-ORGANIZATION-NOT-FOUND))
+    )
+        (asserts! (is-eq tx-sender (get founder org-data)) ERR-NOT-AUTHORIZED)
+        
+        (map-set organizations
+            { org-id: org-id }
+            (merge org-data { 
+                is-active: (not (get is-active org-data))
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Platform admin functions (only contract owner)
+(define-public (update-platform-fee-rate (new-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (<= new-rate u1000) ERR-INVALID-INPUT) ;; Max 10%
+        (var-set platform-fee-rate new-rate)
+        (ok true)
+    )
+)
+
+(define-public (withdraw-platform-fees (amount uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (<= amount (var-get total-platform-fees)) ERR-INVALID-AMOUNT)
+        
+        (var-set total-platform-fees (- (var-get total-platform-fees) amount))
+        (try! (as-contract (stx-transfer? amount tx-sender CONTRACT-OWNER)))
         (ok true)
     )
 )
